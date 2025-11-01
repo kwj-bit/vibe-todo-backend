@@ -137,11 +137,11 @@ const mongooseOptions = {
   retryWrites: true,
   w: 'majority',
   maxPoolSize: 10,
-  minPoolSize: 1,
-  // 무료 티어 클러스터가 sleep 상태일 경우를 대비한 옵션
-  bufferCommands: false,
-  bufferMaxEntries: 0
+  minPoolSize: 1
 };
+
+// Mongoose 글로벌 설정 (무료 티어 클러스터가 sleep 상태일 경우를 대비)
+mongoose.set('bufferCommands', false);
 
 // MongoDB 연결 상태 추적
 let isMongoConnected = false;
@@ -167,10 +167,10 @@ const connectMongoDB = async () => {
     return;
   }
 
-  // 최대 재시도 횟수 초과 시 더 이상 시도하지 않음
+  // 최대 재시도 횟수 초과 시 경고만 출력 (자동 재시도는 계속)
   if (connectionAttempts >= maxConnectionAttempts) {
-    console.error(`❌ 최대 재시도 횟수(${maxConnectionAttempts})에 도달했습니다. 수동으로 재시도해주세요.`);
-    return;
+    console.warn(`⚠️  재시도 횟수(${maxConnectionAttempts}) 초과했지만 계속 시도합니다...`);
+    // 계속 시도하되, 재시도 간격을 늘림
   }
 
   connectionAttempts++;
@@ -216,20 +216,13 @@ const connectMongoDB = async () => {
       console.error('   에러 스택:', err.stack.split('\n').slice(0, 5).join('\n'));
     }
 
-    // 재시도 로직
-    if (connectionAttempts < maxConnectionAttempts) {
-      const delay = Math.min(2000 * connectionAttempts, 15000); // 최대 15초
-      console.log(`   ⏳ ${delay / 1000}초 후 재시도...`);
-      setTimeout(() => {
-        connectMongoDB();
-      }, delay);
-    } else {
-      console.error(`   ❌ 최대 재시도 횟수(${maxConnectionAttempts}) 도달. 자동 재시도 중지.`);
-      console.error('   💡 해결 방법:');
-      console.error('      1. Heroku 런타임 로그 확인: heroku logs --tail --app vibe-todo-backend2');
-      console.error('      2. MongoDB Atlas 클러스터 상태 확인');
-      console.error('      3. 환경변수 MONGODB_URI 재확인');
-    }
+    // 재시도 로직 (무한 재시도, 하지만 간격은 점진적으로 증가)
+    const baseDelay = connectionAttempts < maxConnectionAttempts ? 2000 : 30000; // 최대 횟수 초과 시 30초 대기
+    const delay = Math.min(baseDelay * Math.min(connectionAttempts, 10), 60000); // 최대 60초
+    console.log(`   ⏳ ${delay / 1000}초 후 재시도...`);
+    setTimeout(() => {
+      connectMongoDB();
+    }, delay);
   }
 };
 
