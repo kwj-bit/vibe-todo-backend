@@ -23,6 +23,17 @@ app.use((req, res, next) => {
   next();
 });
 
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'Todo Backend API',
+    status: 'running',
+    endpoints: {
+      health: '/health',
+      todos: '/todos'
+    }
+  });
+});
+
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -39,29 +50,34 @@ if (!process.env.MONGODB_URI) {
   console.log('✅ 환경변수에서 MongoDB URI를 사용합니다.');
 }
 
+// 서버를 먼저 시작
+const server = app.listen(port, () => {
+  console.log(`서버가 ${port}번 포트에서 실행 중입니다.`);
+});
+
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`\n❌ 포트 ${port}가 이미 사용 중입니다. (EADDRINUSE)`);
+    console.error('\n해결 방법:');
+    console.error(`1. .env 파일에 PORT=3000 (또는 다른 포트) 추가`);
+    console.error(`2. 또는 포트 ${port}를 사용 중인 프로세스를 종료`);
+    console.error(`   Windows: netstat -ano | findstr :${port} 로 PID 확인 후 taskkill /PID [PID] /F`);
+    process.exit(1);
+  }
+  console.error('서버 에러:', err);
+  process.exit(1);
+});
+
+// MongoDB 연결 (비동기로 처리)
 mongoose
   .connect(mongoUri)
   .then(() => {
     console.log('MongoDB 연결 성공');
-    const server = app.listen(port, () => {
-      console.log(`서버가 ${port}번 포트에서 실행 중입니다.`);
-    });
-    server.on('error', (err) => {
-      if (err && err.code === 'EADDRINUSE') {
-        console.error(`\n❌ 포트 ${port}가 이미 사용 중입니다. (EADDRINUSE)`);
-        console.error('\n해결 방법:');
-        console.error(`1. .env 파일에 PORT=3000 (또는 다른 포트) 추가`);
-        console.error(`2. 또는 포트 ${port}를 사용 중인 프로세스를 종료`);
-        console.error(`   Windows: netstat -ano | findstr :${port} 로 PID 확인 후 taskkill /PID [PID] /F`);
-        process.exit(1);
-      }
-      console.error('서버 에러:', err);
-      process.exit(1);
-    });
   })
   .catch((err) => {
     console.error('MongoDB 연결 실패:', err.message);
-    process.exit(1);
+    console.error('서버는 계속 실행되지만 MongoDB 기능은 사용할 수 없습니다.');
+    // Heroku에서는 연결 실패 시에도 서버가 계속 실행되도록 함
   });
 
 
