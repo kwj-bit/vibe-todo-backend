@@ -64,7 +64,15 @@ app.get('/health', (req, res) => {
       name: mongoose.connection.name || null
     },
     connectionAttempts: connectionAttempts,
-    hasMongoUri: !!process.env.MONGODB_URI
+    maxConnectionAttempts: maxConnectionAttempts,
+    hasMongoUri: !!process.env.MONGODB_URI,
+    lastError: lastError ? {
+      name: lastError.name,
+      message: lastError.message,
+      time: lastErrorTime
+    } : null,
+    mongoUriFormat: process.env.MONGODB_URI ? 
+      process.env.MONGODB_URI.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@') : null
   });
 });
 
@@ -138,59 +146,89 @@ const mongooseOptions = {
 // MongoDB 연결 상태 추적
 let isMongoConnected = false;
 let connectionAttempts = 0;
-const maxConnectionAttempts = 5;
+const maxConnectionAttempts = 10; // 재시도 횟수 증가
+let lastError = null; // 마지막 에러 저장
+let lastErrorTime = null;
 
 // 연결 함수
 const connectMongoDB = async () => {
+  // 이미 연결 중이면 재시도하지 않음
   if (mongoose.connection.readyState === 1) {
     console.log('✅ MongoDB 이미 연결되어 있습니다.');
+    isMongoConnected = true;
+    connectionAttempts = 0;
+    lastError = null;
+    return;
+  }
+
+  // 연결 중이면 대기
+  if (mongoose.connection.readyState === 2) {
+    console.log('⏳ MongoDB 연결 중... 대기합니다.');
+    return;
+  }
+
+  // 최대 재시도 횟수 초과 시 더 이상 시도하지 않음
+  if (connectionAttempts >= maxConnectionAttempts) {
+    console.error(`❌ 최대 재시도 횟수(${maxConnectionAttempts})에 도달했습니다. 수동으로 재시도해주세요.`);
     return;
   }
 
   connectionAttempts++;
-  console.log(`🔄 MongoDB 연결 시도 중... (${connectionAttempts}/${maxConnectionAttempts})`);
+  const attemptNum = connectionAttempts;
+  console.log(`🔄 MongoDB 연결 시도 ${attemptNum}/${maxConnectionAttempts}`);
+  console.log(`   URI: ${mongoUri.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@')}`);
+  console.log(`   타임아웃: ${mongooseOptions.serverSelectionTimeoutMS}ms`);
 
   try {
     await mongoose.connect(mongoUri, mongooseOptions);
-    isMongoConnected = true;
-    connectionAttempts = 0; // 성공 시 카운터 리셋
-    console.log('✅ MongoDB 연결 성공!');
+    // 연결 성공은 'connected' 이벤트에서 처리됨
   } catch (err) {
     isMongoConnected = false;
-    console.error('❌ MongoDB 연결 실패');
-    console.error('에러 이름:', err.name);
-    console.error('에러 메시지:', err.message);
-    console.error('에러 코드:', err.code || 'N/A');
+    lastError = {
+      name: err.name,
+      message: err.message,
+      code: err.code || 'N/A'
+    };
+    lastErrorTime = new Date().toISOString();
+    
+    console.error(`❌ MongoDB 연결 실패 (시도 ${attemptNum}/${maxConnectionAttempts})`);
+    console.error(`   에러 이름: ${err.name}`);
+    console.error(`   에러 메시지: ${err.message}`);
+    console.error(`   에러 코드: ${err.code || 'N/A'}`);
     
     if (err.name === 'MongoServerSelectionError') {
-      console.error('💡 서버 선택 오류 - 확인 사항:');
-      console.error('   1. MongoDB Atlas IP 화이트리스트에 0.0.0.0/0 추가 (필수!)');
-      console.error('   2. MongoDB Atlas 클러스터가 실행 중인지 확인 (무료 티어는 sleep 가능)');
-      console.error('   3. 네트워크 연결 확인');
-      console.error('   4. URI 형식 확인:', mongoUri.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@'));
+      console.error('   💡 서버 선택 오류');
+      console.error('      1. MongoDB Atlas IP 화이트리스트: 0.0.0.0/0 확인');
+      console.error('      2. 클러스터 상태: 실행 중인지 확인 (무료 티어 sleep 가능)');
+      console.error('      3. URI 형식 확인');
     } else if (err.name === 'MongoAuthenticationError') {
-      console.error('💡 인증 오류 - 확인 사항:');
-      console.error('   1. MongoDB 사용자 이름과 비밀번호 확인');
-      console.error('   2. MONGODB_URI의 인증 정보 확인');
-      console.error('   3. MongoDB Atlas Database Access에서 사용자 권한 확인');
+      console.error('   💡 인증 오류');
+      console.error('      1. 사용자 이름/비밀번호 확인');
+      console.error('      2. Database Access 권한 확인');
     } else if (err.name === 'MongoNetworkError' || err.name === 'MongoNetworkTimeoutError') {
-      console.error('💡 네트워크 오류 - 확인 사항:');
-      console.error('   1. MongoDB Atlas IP 화이트리스트 설정');
-      console.error('   2. 방화벽 또는 네트워크 제한 확인');
-      console.error('   3. 클러스터 상태 확인');
-    } else {
-      console.error('💡 전체 에러 스택:', err.stack || err);
+      console.error('   💡 네트워크 오류');
+      console.error('      1. IP 화이트리스트 확인');
+      console.error('      2. 네트워크 연결 확인');
+    }
+    
+    // 전체 에러 스택 출력 (디버깅용)
+    if (err.stack) {
+      console.error('   에러 스택:', err.stack.split('\n').slice(0, 5).join('\n'));
     }
 
     // 재시도 로직
     if (connectionAttempts < maxConnectionAttempts) {
-      const delay = Math.min(1000 * Math.pow(2, connectionAttempts - 1), 10000); // 지수 백오프
-      console.log(`⏳ ${delay / 1000}초 후 재시도...`);
+      const delay = Math.min(2000 * connectionAttempts, 15000); // 최대 15초
+      console.log(`   ⏳ ${delay / 1000}초 후 재시도...`);
       setTimeout(() => {
         connectMongoDB();
       }, delay);
     } else {
-      console.error('❌ 최대 재시도 횟수에 도달했습니다. 수동으로 재시도해주세요.');
+      console.error(`   ❌ 최대 재시도 횟수(${maxConnectionAttempts}) 도달. 자동 재시도 중지.`);
+      console.error('   💡 해결 방법:');
+      console.error('      1. Heroku 런타임 로그 확인: heroku logs --tail --app vibe-todo-backend2');
+      console.error('      2. MongoDB Atlas 클러스터 상태 확인');
+      console.error('      3. 환경변수 MONGODB_URI 재확인');
     }
   }
 };
@@ -208,12 +246,14 @@ mongoose.connection.on('error', (err) => {
 
 mongoose.connection.on('disconnected', () => {
   isMongoConnected = false;
-  console.warn('⚠️  MongoDB 연결 끊김 - 재연결 시도...');
-  // 자동 재연결 시도
+  console.warn('⚠️  MongoDB 연결 끊김');
+  // 자동 재연결은 connectMongoDB 함수 내에서 처리
+  // 여기서는 카운터를 리셋하지 않고 재연결 시도
   if (connectionAttempts < maxConnectionAttempts) {
+    console.log('   재연결 시도...');
     setTimeout(() => {
       connectMongoDB();
-    }, 2000);
+    }, 3000);
   }
 });
 
