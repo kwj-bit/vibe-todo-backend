@@ -35,11 +35,28 @@ app.get('/', (req, res) => {
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
+  const mongoStatus = mongoose.connection.readyState === 1 ? 'connected' : 'disconnected';
+  res.json({ 
+    status: 'ok',
+    mongodb: mongoStatus,
+    readyState: mongoose.connection.readyState // 0=disconnected, 1=connected, 2=connecting, 3=disconnecting
+  });
 });
 
-// routes
-app.use('/todos', require('./routes/todos'));
+// MongoDB 연결 상태 체크 미들웨어
+const checkMongoConnection = (req, res, next) => {
+  if (mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ 
+      message: '서비스 일시 중단',
+      error: 'MongoDB에 연결할 수 없습니다. 잠시 후 다시 시도해주세요.',
+      details: 'Database connection unavailable'
+    });
+  }
+  next();
+};
+
+// routes - MongoDB 연결 체크 미들웨어 추가
+app.use('/todos', checkMongoConnection, require('./routes/todos'));
 
 const port = process.env.PORT || 5000;
 const mongoUri = process.env.MONGODB_URI || 'mongodb://localhost:27017/todo';
@@ -68,16 +85,46 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
+// MongoDB 연결 옵션 개선
+const mongooseOptions = {
+  serverSelectionTimeoutMS: 5000, // 5초 타임아웃
+  socketTimeoutMS: 45000,
+  connectTimeoutMS: 10000,
+  retryWrites: true,
+  w: 'majority'
+};
+
+// MongoDB 연결 상태 추적
+let isMongoConnected = false;
+
+mongoose.connection.on('connected', () => {
+  isMongoConnected = true;
+  console.log('✅ MongoDB 연결 성공');
+});
+
+mongoose.connection.on('error', (err) => {
+  isMongoConnected = false;
+  console.error('❌ MongoDB 연결 에러:', err.message);
+});
+
+mongoose.connection.on('disconnected', () => {
+  isMongoConnected = false;
+  console.warn('⚠️  MongoDB 연결 끊김');
+});
+
 // MongoDB 연결 (비동기로 처리)
 mongoose
-  .connect(mongoUri)
+  .connect(mongoUri, mongooseOptions)
   .then(() => {
-    console.log('MongoDB 연결 성공');
+    isMongoConnected = true;
   })
   .catch((err) => {
-    console.error('MongoDB 연결 실패:', err.message);
-    console.error('서버는 계속 실행되지만 MongoDB 기능은 사용할 수 없습니다.');
-    // Heroku에서는 연결 실패 시에도 서버가 계속 실행되도록 함
+    isMongoConnected = false;
+    console.error('❌ MongoDB 초기 연결 실패:', err.message);
+    console.error('💡 확인 사항:');
+    console.error('   1. Heroku 환경변수 MONGODB_URI가 설정되어 있는지 확인');
+    console.error('   2. MongoDB Atlas IP 화이트리스트에 0.0.0.0/0 추가 (모든 IP 허용)');
+    console.error('   3. MongoDB Atlas 네트워크 액세스 설정 확인');
   });
 
 
